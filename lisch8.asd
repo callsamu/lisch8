@@ -1,6 +1,6 @@
 (defsystem :lispychip-8
-  :name "Lisp Chip8"
-  :description "Chip8 emulator in Common Lisp"
+  :name "Lisch8"
+  :description "Simple Chip-8 emulator in Common Lisp"
   :serial t
   :components
   (:module "src"
