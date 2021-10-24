@@ -1,12 +1,43 @@
 (ql:quickload :rutils)
+(ql:quickload :chanl)
 
 (defpackage :lisch8/core
-  (:use :common-lisp :rutils))
+  (:use :common-lisp :rutils :chanl)
+  (:export
+   :chip :screen
+   :run+clock :run
+   :load-rom
+   :*output-channel*
+   :width :height :memory))
 
 (in-package :lisch8/core)
 
+;;; Chip8 font
+(defconstant +font+
+  #(#xF0 #x90 #x90 #x90 #xF0
+    #x20 #x60 #x20 #x20 #x70
+    #xF0 #x10 #xF0 #x80 #xF0
+    #xF0 #x10 #xF0 #x10 #xF0
+    #x90 #x90 #xF0 #x10 #x10
+    #xF0 #x80 #xF0 #x10 #xF0
+    #xF0 #x80 #xF0 #x90 #xF0
+    #xF0 #x10 #x20 #x40 #x40
+    #xF0 #x90 #xF0 #x90 #xF0
+    #xF0 #x90 #xF0 #x10 #xF0
+    #xF0 #x90 #xF0 #x90 #x90
+    #xE0 #x90 #xE0 #x90 #xE0
+    #xF0 #x80 #x80 #x80 #xF0
+    #xE0 #x90 #x90 #x90 #xE0
+    #xF0 #x80 #xF0 #x80 #xF0
+    #xF0 #x80 #xF0 #x80 #x80))
+
 ;;; Constants
+(defconstant +initial-address+ #x200
+  "Program counter's initial value")
+(defconstant +font-sprite-size+ 5)
 (defconstant +mem-size+ 4096)
+(defconstant +screen-width+ 64)
+(defconstant +screen-height+ 32)
 (defconstant +opcode-size+ 2) ; An opcode is 2 bytes large
 
 ;;; Types
@@ -14,20 +45,82 @@
 (deftype int-16 ()  '(unsigned-byte 16))
 
 ;;; Main data structure
-(defstruct chip
-  (Vr (make-array 16 :element-type 'int-8)
-   :type (simple-array int-8 (16)))
-  (Ir 0 :type int-16)
-  (delayr 0 :type int-8)
-  (soundr 0 :type int-8)
-  (counter 200 :type int-16)
-  (stack (make-array 16 :element-type 'int-16
-			:fill-pointer 0))
-  (memory (make-array +mem-size+ :element-type 'int-8)))
+(defclass chip ()
+  ((v-registers
+    :type (simple-array int-8 (16))
+    :initform
+    (make-array 16
+     :element-type 'int-8)
+    :reader v-regs)
+   (i-register
+    :type int-16
+    :initform 0
+    :accessor i-reg)
+  (delay-timer
+   :type int-8
+   :initform 0
+   :accessor delayt)
+  (sound-register
+   :type int-8
+   :initform 0
+   :accessor soundt)
+  (step-counter?
+   :initform t
+   :accessor step-counter?
+   :documentation
+   "If nil, prevents the program counter
+    from being incremented during a cycle")
+  (counter
+   :type int-16
+   :initform +initial-address+
+   :accessor counter)
+  (stack
+   :initform
+   (make-array 16
+    :element-type 'int-16
+    :fill-pointer 0)
+   :reader stack)
+  (memory
+   :initform
+   (make-array +mem-size+
+     :element-type 'int-8)
+   :reader memory)
+  (screen
+   :initform (make-instance 'screen)
+   :reader screen)
+  (keyboard
+   :initform
+   (make-array 16
+    :element-type 'bit)
+   :reader keyboard))) 
+
+(defmethod initialize-instance :after ((this chip) &key)
+  (memory-copy +font+ (memory this) #.(length +font+)))
+   
+(defclass screen ()
+  ((width
+    :initform +screen-width+
+    :reader width)
+   (height
+    :initform +screen-height+
+    :reader height)
+   (refresh?
+    :initform t
+    :accessor refresh?)
+   (memory
+    :initform nil
+    :reader memory)))
+
+(defmethod initialize-instance :after ((this screen) &key)
+  (with-slots (width height memory) this
+    (setf memory (make-array (* width height) :element-type 'bit))))
+
+;;; Channels
+(defparameter *output-channel* (make-instance 'channel))
 
 ;;; Globals
 (defparameter *chip*
-  (make-chip))
+  (make-instance 'chip))
 
 (defparameter *cpu-function-table*
   (make-hash-table :size 37))
@@ -36,6 +129,14 @@
 (defun hexadecimal-string-p (hs)
   (and (stringp hs)
        (every (lambda (c) (digit-char-p c 16)) hs)))
+
+(defun make-clock ()
+  (let ((time (get-internal-real-time)))
+    (lambda (&optional reset)
+      (if reset
+	  (setf time (get-internal-real-time))
+	  (float (/ (- (get-internal-real-time) time)
+		    internal-time-units-per-second))))))
 
 (declaim (inline map-if))
 (defun map-if (pred func seq)
@@ -74,14 +175,14 @@
 (defun byte-lshift (a)
   "Left bitwise shift which also
    returns the most significant bit."
-  (values (ash a 1)
-	  (get-bit 0 a)))
+  (values (mod (ash a 1) 256)
+	  (get-bit 7 a)))
 	    
 (defun byte-rshift (a)
   "Right bitwise shift which also
    returns the least significant bit."
   (values (ash a -1)
-	  (get-bit 7 a)))
+	  (get-bit 0 a)))
 
 (declaim (inline random-byte))
 (defun random-byte ()
@@ -108,10 +209,54 @@
   (loop for i from src-offset to (+ (1- bytes) src-offset)
 	for j from dest-offset
 	do (setf (aref dest j)
-		 (aref src i))))
+		 (aref src i))
+	finally (return dest)))
+	   
+
+(defmacro xorf (place value)
+  `(setf ,place (logxor ,place ,value)))
+
+;; For screen drawing
+(declaim (inline collisionp))
+(defun collisionp (bit result)
+  (logand (lognot result) bit))
+
+(declaim (inline draw-bit))
+(defun draw-bit (index bit screen)
+  (unless (null index)
+    (collisionp bit (xorf (aref (memory screen) index) bit))))
+
+(defun draw-byte (x y byte screen)
+  (flet ((coords (x y)
+	   (+ x (* y (width screen)))))
+    (let ((x (mod x (width screen)))
+	  (y (mod y (height screen))))
+      (rutils:iter
+        (:with start := (coords x y))
+        (:with end := (coords (width screen) y))
+        (:with flag := 0)
+        (:for i :from 7 :downto 0)
+        (:for p :from start :to end)
+        (:for bit := (get-bit i byte))
+        (:for collision := (draw-bit p bit screen))
+        (when (= 1 collision) (setf flag 1))
+        (:finally (return-from draw-byte flag))))))
+
+(defun draw-sprite (x y sprite screen)
+  (setf (refresh? screen) t)
+  (rutils:iter
+    (:for b :in sprite)
+    (:for i :from y :to (height screen))
+    (:with flag := 0)
+    (setf flag (logior flag (draw-byte x i b screen)))
+    (:finally (return flag))))
+
+;; Keyboard Input
+(declaim (inline key-pressed-p))
+(defun key-pressed-p (keynum keyboard)
+  (not (zerop (aref keyboard keynum))))
 
 ;; Assembly Related
-
 (defclass instruction ()
   ((assembly
     :initarg :asm
@@ -164,7 +309,7 @@
 		   (eql fcs #\$)))))
     (assert (and (not (variablep (first asm)))
                  (every #'symbolp asm)))
-    (map-if #'variablep #'first-symbol-char asm))))
+    (map-if #'variablep #'first-symbol-char asm)))
 
 (defun format-sexp-asm (asm vars)
   (flet ((format-var (prefix)
@@ -224,8 +369,6 @@
       (if-it (gethash (logand mask opcode) table)
 	(list it vars) 
 	(error "Instruction not found: opcode ~4,'0x. is invalid" opcode)))))
-
-
 
 ;;; Instruction DSL
 
@@ -298,19 +441,20 @@
    Each binding is prefixed by a @. Some, like @V, are actually setfable
    functions which return the element at position x of the slot, which must
    be an array."
-  (once-only ((echip chip-obj))
-   `(with-accessors ((@I chip-ir)
-	             (@DT chip-delayr)
-		     (@ST chip-soundr) 
-		     (@PC chip-counter)
-		     (@V chip-vr)
-		     (@MEM chip-memory)
-		     (@STACK chip-stack))
-                     ,echip
-      (let-places ((@V (x) (aref @V x))
-		   (@MEM (x) (aref @MEM x)))
-        ,@body))))
-		       
+ `(with-accessors ((@I i-reg)
+	           (@DT delayt)
+	           (@ST soundt) 
+		   (@PC counter)
+		   (@V v-regs)
+		   (@MEM memory)
+		   (@STACK stack)
+		   (@SCREEN screen)
+		   (@KBD keyboard)
+		   (step-counter? step-counter?))
+       ,chip-obj
+    (let-places ((@V (x) (aref @V x))
+	         (@MEM (x) (aref @MEM x)))
+      ,@body)))
 
 (defmacro definstruction (name opcode &body body)
   (destructuring-bind (key vars) opcode
@@ -325,31 +469,63 @@
 ;; Core functions
 (defun load-rom (chip pathname)
   (with-open-file (fd pathname :element-type 'unsigned-byte)
-    (read-sequence (chip-memory chip) fd :start 200))))
+    (read-sequence (memory chip) fd :start #x200)
+    chip))
 		     
 (defun fetch (chip)
   (with-chip-registers chip
     (let ((b1 (@MEM @PC))
 	  (b2 (@MEM (1+ @PC))))
       (concat-bytes b1 b2))))
+
+(defun print-debug-info (chip op asm)
+  (format t
+    "OP: ~x Counter: ~x Delay: ~x~%V-REGS:~a ~%I-REG:~x I-MEM: ~a~%~a~%~%"
+    op
+    (counter chip)
+    (delayt chip)
+    (v-regs chip)
+    (i-reg chip)
+    (loop for i from (i-reg chip) to (+ #xF (i-reg chip))
+	  collect (aref (memory chip) i))
+    asm))
 	     
 (defun execute (chip opcode)
   (destructuring-bind (ins vars) (retrieve-instruction opcode)
-    (print (format-sexp-asm (instruction-asm ins) vars))))
-    (apply (instruction-func ins) chip vars)
+    (print-debug-info chip opcode (disassembly ins vars))
+    (when (null (car vars)) (setf vars nil))
+    (apply (func ins) (cons chip vars))))
  
-(defun disasm (opcode)
-  (multiple-value-bind (ins vars) (retrieve-instruction opcode)
-    (format-sexp-asm (instruction-asm ins) vars)))
-
 (defun cycle (chip)
-  (execute (fetch chip))
-  (print (chip-counter chip))
-  (incf (chip-counter chip) 2))
+  (let ((opcode (fetch chip)))
+    (execute chip opcode)
+    (if (step-counter? chip) 
+      (incf (counter chip) 2)
+      (setf (step-counter? chip) t))))
 
 (defun run (chip)
   (let ((*chip* chip))
     (loop (cycle chip) (sleep 1))))
+
+(defconstant +timer-decrease-rate+ (float (/ 1 60)))
+
+(defmacro decrease-timer (timer)
+  `(unless (zerop ,timer) (decf ,timer)))
+
+(defun run+clock (chip clockspeed)
+  (with-accessors ((dt delayt) (st soundt) (screen screen)) chip
+    (iter
+      (:with timer := (make-clock))
+      (:with chip-clock := (make-clock))
+      (when (> (funcall timer) +timer-decrease-rate+)
+        (decrease-timer dt)
+	(decrease-timer dt)
+        (funcall timer :reset))
+      (when (> (funcall chip-clock) clockspeed)
+	(cycle chip)
+	(funcall timer :reset))
+      (when (refresh? (screen chip))
+	(send *output-channel* (screen chip) :blockp t)))))
 		       
 ;; CHIP-8 instructions
 ;; See http://devernay.free.fr/hacks/chip8/C8TECH10.HTM
@@ -359,17 +535,24 @@
   (print "Unsuported instruction: SYS"))
 
 (definstruction (:CLS) #[00E0]
-  (print "CLS not implemented."))
+  (iter (:for i :below (length (memory @SCREEN)))
+    (setf (aref (memory @SCREEN) i) 0)))
+
+(defmacro jump-to (address)
+  "Set counter to address and prevent it
+   from being incremented during cycle"
+  `(setf @PC ,address
+         step-counter? nil))
 
 (definstruction (:RET) #[00EE]
   (setf @PC (vector-pop @STACK)))
 
 (definstruction (:JMP :$addr) #[1 nnn]
-  (setf @PC nnn))
+  (jump-to nnn))
 
 (definstruction (:CALL :$addr) #[2 nnn]
   (vector-push @PC @STACK)
-  (setf @PC nnn))
+  (jump-to nnn))
 
 (defmacro branch-if (pred)
   `(when ,pred (incf @PC 2)))
@@ -387,20 +570,18 @@
   (branch-if (/= (@V x) (@V y))))
 
 (definstruction (:SKP :@x) #[E x 9E]
-  ;;(key-pressed-p (@V x)))
-  (print "key-pressed-p not implemented."))
+  (branch-if (key-pressed-p (@V x) @KBD)))
 
 (definstruction (:SKNP :@x) #[E x A1]
-  ;;(not (key-pressed-p (@V x))))
-  (print "key-pressed-p not implemented."))
+  (branch-if (not (key-pressed-p (@V x) @KBD))))
 
 (definstruction (:LD :@x :$byte) #[6 x kk]
   (setf (@V x) kk))
 
 (definstruction (:ADD :@x :$byte) #[7 x kk]
-  (incf (@V x) kk))
+  (setf (@V x) (byte-add (@V x) kk)))
 
-(definstruction (:LD :@x :y) #[8 x y 0]
+(definstruction (:LD :@x :@y) #[8 x y 0]
   (setf (@V x) (@V y)))
 
 (definstruction (:OR :@x :@y) #[8 x y 1]
@@ -416,47 +597,55 @@
   "Due to free variable injections, should 
    only be used inside with-chip forms.
    Apply the operation, set the first
-   xth register to the result and the flag
-   register to the flag value."
+   set the flag register to the flag value
+   and return the result value."
   (with-gensyms (result flag)
     `(multiple-value-bind (,result ,flag)
-	                  (apply #',operation ,x ,ys)
-       (setf (@V ,x) ,result)
-       (setf (@V #xF) ,flag))))
+	                  (,operation ,x ,@ys)
+       (setf (@V #xF) ,flag)
+       ,result)))
 
 (definstruction (:ADD :@x :@y) #[8 x y 4]
-  (do-arithmetic byte-add x y))
+  (setf (@V x) (do-arithmetic byte-add (@V x) (@V y))))
 
 (definstruction (:SUB :@x :@y) #[8 x y 5]
-  (do-arithmetic byte-sub x y))
+  (setf (@V x) (do-arithmetic byte-sub (@V x) (@V y))))
 
 (definstruction (:SHR :@x :@y) #[8 x y 6]
-  (do-arithmetic byte-rshift x y))
+  (setf (@V x) (do-arithmetic byte-rshift (@V x))))
 
 (definstruction (:SUBN :@x :@y) #[8 x y 7]
-  (do-arithmetic byte-sub x y))
+  (setf (@V x) (do-arithmetic byte-sub (@V y) (@V x))))
 
 (definstruction (:SHL :@x :@y) #[8 x y E]
-  (do-arithmetic byte-lshift x y))
+  (setf (@V x) (do-arithmetic byte-lshift (@V x))))
 
 (definstruction (:LD :I :$byte) #[A nnn]
   (setf @I nnn))
 
 (definstruction (:JP :V0 :$addr) #[B nnn]
-  (setf @I (+ nnn (@V 0))))
+  (setf @PC (+ nnn (@V 0))))
 
 (definstruction (:RND :@x :$byte) #[C x kk]
   (setf (@V x) (logand (random-byte) kk)))
 
 (definstruction (:DRW :@x :@y :$nibble) #[D x y n]
-  (print "DRW is not implemented"))
+  (let ((sprite (iter (:for i :from @I :to (+ @I n -1))
+                  (:collect (@MEM i)))))
+    (setf (@V #xF)
+	  (draw-sprite (@V x) (@V y) sprite @SCREEN))))
 
 (definstruction (:LD :@x :DT) #[F x 07]
   (setf (@V x) @DT))
 
 (definstruction (:LD :@x :K) #[F x 0A]
-  ;; (setf (@V x) (read-key)))
-  (print "Read-key not implemented."))
+  (flet ((find-pressed-key (kbd)
+	   (iter (:for i to #xF)
+	     (when (key-pressed-p i kbd)
+	       (return i)))))
+    (if-it (find-pressed-key @KBD)
+           (setf (@V x) it)
+	   (decf @PC 2))))
 
 (definstruction (:LD :DT :@x) #[F x 15]
   (setf @DT (@V x)))
@@ -464,13 +653,11 @@
 (definstruction (:LD :ST :@x) #[F x 18]
   (setf @ST (@V x)))
 
-;; Versão nova
 (definstruction (:ADD :I :@x) #[F x 1E]
   (setf @I (+ (@V x) @I)))
 
 (definstruction (:LD :F :@x) #[F x 29]
-  ;;Not yet implemented.
-  (print "Read-font not implemented"))
+  (setf @I (* (@V x) +font-sprite-size+)))
 
 (definstruction (:LD :B :@x) #[F x 33]
   (loop for d in (list-n-digits 3 (@V x))
@@ -478,7 +665,8 @@
 	do (setf (@MEM a) d)))
 
 (definstruction (:LD :[I] :@[0..x]) #[F x 55]
-  (memory-copy @V @MEM x :dest-offset @I))
+  (memory-copy @V @MEM (1+ x) :dest-offset @I))
 
 (definstruction (:LD :@[0..x] :[I]) #[F x 65]
-  (memory-copy @MEM @V x :src-offset @I))
+  (memory-copy @MEM @V (1+ x) :src-offset @I))
+
