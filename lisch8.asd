@@ -14,6 +14,6 @@
 		 (:file "instructions")
 		 (:file "chip")
 		 (:file "instruction-set"))))
-  :depends-on (:rutils))
+  :depends-on (:rutils :chanl :named-readtables))
 
   
