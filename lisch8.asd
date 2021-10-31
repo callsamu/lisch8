@@ -5,7 +5,15 @@
   :components
   (:module "src"
    :serial t
-   :components (:file "core"))
+   :components
+   (:module "core"
+    :serial t
+    :components ((:file "package")
+		 (:file "utils")
+		 (:file "screen")
+		 (:file "instructions")
+		 (:file "chip")
+		 (:file "instruction-set"))))
   :depends-on (:rutils))
 
   
