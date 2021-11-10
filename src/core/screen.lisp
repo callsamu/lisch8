@@ -19,6 +19,12 @@
     :initform nil
     :reader memory)))
 
+(defmethod initialize-instance :after ((this screen) &key)
+  (with-slots (width height memory)
+      this
+    (setf memory (make-array (* width height)
+			     :element-type 'bit))))
+
 (declaim (inline collisionp))
 (defun collisionp (bit result)
   (logand (lognot result) bit))
