@@ -163,6 +163,11 @@
          (:until (eql c #\]))
          (:collect c)))))
 
+(defreadtable :instructions
+  (:merge :standard)
+  (:dispatch-macro-char #\# #\[
+		   (function |#[]-opcode-string-reader|)))
+
 (defmacro with-chip-registers (chip-obj &body body)
   "Wraps the body in both a macrolet and symbol-macrolet
    which define bindings for accessing the chip object's main slots.

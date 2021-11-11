@@ -6,6 +6,9 @@
 (defconstant +mem-size+ 4096)
 (defconstant +font-sprite-size+ 5)
 
+(defparameter *output-channel*
+  (make-instance 'chanl:channel))
+
 ;;; Chip8 font
 (defconstant +font+
   #(#xF0 #x90 #x90 #x90 #xF0
@@ -75,15 +78,17 @@
     :element-type 'bit)
    :reader keyboard))) 
 
-(defmethod initialize-instance :after ((this chip) &key)
-  (memory-copy +font+ (memory this) #.(length +font+)))
-
-;; Core functions
+;; Utility for loading roms
 (defun load-rom (chip pathname)
   (with-open-file (fd pathname :element-type 'unsigned-byte)
     (read-sequence (memory chip) fd :start #x200)
     chip))
-		     
+
+(defmethod initialize-instance :after ((this chip) &key rom)
+  (memory-copy +font+ (memory this) #.(length +font+))
+  (unless (null rom)
+    (load-rom this rom)))
+
 (defun fetch (chip)
   (with-chip-registers chip
     (let ((b1 (@MEM @PC))

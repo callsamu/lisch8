@@ -1,8 +1,16 @@
 (defpackage :lisch8/core
-  (:use :common-lisp :rutils :chanl)
+  (:use
+   :common-lisp
+   :rutils
+   :chanl
+   :named-readtables)
   (:export
-   :chip :screen
-   :run+clock :run
+   :chip
+   :run+clock
+   :run
    :load-rom
    :*output-channel*
-   :width :height :memory))
+   :screen
+   :width
+   :height
+   :memory))

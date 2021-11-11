@@ -1,11 +1,6 @@
 (in-package :lisch8/core)
 
-(named-readtables:defreadtable :instructions
-  (:merge :standard)
-  (:dispatch-macro-char #\# #\[
-		   (function |#[]-opcode-string-reader|)))
-
-(named-readtables:in-readtable :instructions)
+(in-readtable :instructions)
 
 ;; CHIP-8 instructions
 ;; See http://devernay.free.fr/hacks/chip8/C8TECH10.HTM
