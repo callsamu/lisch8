@@ -7,9 +7,7 @@
   (:export
    :chip
    :run+clock
-   :run
-   :load-rom
-   :*output-channel*
+   :run-chip
    :screen
    :width
    :height

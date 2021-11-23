@@ -6,9 +6,6 @@
 (defconstant +mem-size+ 4096)
 (defconstant +font-sprite-size+ 5)
 
-(defparameter *output-channel*
-  (make-instance 'chanl:channel))
-
 ;;; Chip8 font
 (defconstant +font+
   #(#xF0 #x90 #x90 #x90 #xF0
@@ -85,7 +82,9 @@
     chip))
 
 (defmethod initialize-instance :after ((this chip) &key rom)
-  (memory-copy +font+ (memory this) #.(length +font+))
+  (memory-copy +font+
+	       (memory this)
+	       #.(length +font+))
   (unless (null rom)
     (load-rom this rom)))
 
@@ -104,14 +103,20 @@
     (v-regs chip)
     (i-reg chip)
     (loop for i from (i-reg chip) to (+ #xF (i-reg chip))
-	  collect (aref (memory chip) i))
+	  collect (? chip 'memory i))
     asm))
 	     
 (defun execute (chip opcode)
-  (destructuring-bind (ins vars) (retrieve-instruction opcode)
-    (print-debug-info chip opcode (disassembly ins vars))
-    (when (null (car vars)) (setf vars nil))
-    (apply (func ins) (cons chip vars))))
+  (destructuring-bind (ins vars)
+      (retrieve-instruction opcode)
+    (print-debug-info chip
+		      opcode
+		      (disassembly ins
+				   vars))
+    (when (null (car vars))
+      (setf vars nil))
+    (apply (func ins)
+	   (cons chip vars))))
  
 (defun cycle (chip)
   (let ((opcode (fetch chip)))
@@ -120,16 +125,17 @@
       (incf (counter chip) 2)
       (setf (step-counter? chip) t))))
 
-(defun run (chip)
-  (loop (cycle chip) (sleep 1)))
-
 (defconstant +timer-decrease-rate+ (float (/ 1 60)))
+(defparameter *clock-rate* (float (/ 1 500)))
 
 (defmacro decrease-timer (timer)
   `(unless (zerop ,timer) (decf ,timer)))
 
-(defun run+clock (chip clockspeed)
-  (with-accessors ((dt delayt) (st soundt) (screen screen)) chip
+(defun run-chip (chip output-chan input-chan)
+  (with-accessors ((dt delayt)
+		   (st soundt)
+		   (screen screen)
+		   (kbd keyboard)) chip
     (iter
       (:with timer := (make-clock))
       (:with chip-clock := (make-clock))
@@ -137,9 +143,16 @@
         (decrease-timer dt)
 	(decrease-timer dt)
         (funcall timer :reset))
-      (when (> (funcall chip-clock) clockspeed)
+      (when (> (funcall chip-clock) *clock-rate*)
 	(cycle chip)
 	(funcall timer :reset))
-      (when (refresh? (screen chip))
-	(send *output-channel* (screen chip) :blockp t)))))
+      (when (refresh? screen)
+	(send output-chan screen :blockp t))
+      (when-it (recv input-chan :blockp nil)
+	(if (null (right it))
+	    (setf (aref kbd (left it)) 0)
+	    (setf (aref kbd (left it)) 1))))))
+  
+
 	
+ 
